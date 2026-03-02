@@ -16,8 +16,8 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    image: calciumion/new-api:latest
-    container_name: new-api
+    build: .                          # 替换 image: calciumion/new-api:latest
+    container_name: new-api-yg
     restart: always
     command: --log-dir /app/logs
     ports:
@@ -26,10 +26,12 @@ services:
       - ./data:/data
       - ./logs:/app/logs
     environment:
-      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api # ⚠️ IMPORTANT: Change the password in production!
-#      - SQL_DSN=root:123456@tcp(mysql:3306)/new-api  # Point to the mysql service, uncomment if using MySQL
+      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
       - REDIS_CONN_STRING=redis://redis
       - TZ=Asia/Shanghai
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL}
 #      - LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx  # Langfuse 公钥
 #      - LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx  # Langfuse 密钥
 #      - LANGFUSE_BASE_URL=http://lf.example.com  # Langfuse 服务地址
