@@ -180,6 +180,13 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			}
 		}
 
+		// Re-enforce Claude thinking constraints after param_override.
+		// Non-Claude requests (no "thinking" field) are treated as no-op.
+		jsonData, err = relaycommon.SanitizeClaudeThinkingParams(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+
 		logger.LogDebug(c, fmt.Sprintf("text request body: %s", string(jsonData)))
 
 		requestBody = bytes.NewBuffer(jsonData)

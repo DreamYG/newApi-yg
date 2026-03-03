@@ -16,7 +16,7 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    build: .                          # 替换 image: calciumion/new-api:latest
+    image: yuguang822/new-api-custom:230303
     container_name: new-api-yg
     restart: always
     command: --log-dir /app/logs

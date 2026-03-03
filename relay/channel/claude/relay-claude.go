@@ -160,7 +160,7 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 			Type: "adaptive",
 		}
 		claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
-		claudeRequest.TopP = common.GetPointer[float64](0)
+		claudeRequest.TopP = nil // must be unset when thinking is enabled
 		claudeRequest.Temperature = common.GetPointer[float64](1.0)
 	} else if model_setting.GetClaudeSettings().ThinkingAdapterEnabled &&
 		strings.HasSuffix(textRequest.Model, "-thinking") {
@@ -175,9 +175,8 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 			Type:         "enabled",
 			BudgetTokens: common.GetPointer[int](int(float64(*claudeRequest.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)),
 		}
-		// TODO: 临时处理
 		// https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
-		claudeRequest.TopP = common.GetPointer[float64](0)
+		claudeRequest.TopP = nil // must be unset when thinking is enabled
 		claudeRequest.Temperature = common.GetPointer[float64](1.0)
 		if !model_setting.ShouldPreserveThinkingSuffix(textRequest.Model) {
 			claudeRequest.Model = strings.TrimSuffix(textRequest.Model, "-thinking")
@@ -217,6 +216,22 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 				Type:         "enabled",
 				BudgetTokens: &budgetTokens,
 			}
+		}
+	}
+
+	// Claude API 约束：thinking 启用（或 adaptive 模式）时：
+	//   - top_p   必须 >= 0.95 或不传（否则 400）
+	//   - top_k   必须不传（否则 400）
+	//   - temperature 必须为 1（或不传）；不得为其他值（否则 400）
+	// 统一在所有 thinking 分支结束后做兜底，避免 Cursor/Cline 等客户端
+	// 传入不合规值被直接透传给上游触发 400 错误。
+	if claudeRequest.Thinking != nil {
+		if claudeRequest.TopP == nil || *claudeRequest.TopP < 0.95 {
+			claudeRequest.TopP = nil
+		}
+		claudeRequest.TopK = nil
+		if claudeRequest.Temperature == nil || *claudeRequest.Temperature != 1.0 {
+			claudeRequest.Temperature = common.GetPointer[float64](1.0)
 		}
 	}
 

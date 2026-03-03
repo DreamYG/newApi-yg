@@ -59,7 +59,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			Type: "adaptive",
 		}
 		request.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
-		request.TopP = common.GetPointer[float64](0)
+		request.TopP = nil // must be unset when thinking is enabled
 		request.Temperature = common.GetPointer[float64](1.0)
 		info.UpstreamModelName = request.Model
 	} else if model_setting.GetClaudeSettings().ThinkingAdapterEnabled &&
@@ -75,15 +75,30 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				Type:         "enabled",
 				BudgetTokens: common.GetPointer[int](int(float64(*request.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)),
 			}
-			// TODO: 临时处理
 			// https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
-			request.TopP = common.GetPointer[float64](0)
+			request.TopP = nil // must be unset when thinking is enabled
 			request.Temperature = common.GetPointer[float64](1.0)
 		}
 		if !model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName) {
 			request.Model = strings.TrimSuffix(request.Model, "-thinking")
 		}
 		info.UpstreamModelName = request.Model
+	}
+
+	// Claude API 约束：thinking 启用（或 adaptive 模式）时：
+	//   - top_p   必须 >= 0.95 或不传（否则 400）
+	//   - top_k   必须不传（否则 400）
+	//   - temperature 必须为 1（或不传）；不得为其他值（否则 400）
+	// 统一在所有 thinking 分支结束后做兜底，避免 Cursor/Cline 等客户端
+	// 传入不合规值被直接透传给上游触发 400 错误。
+	if request.Thinking != nil {
+		if request.TopP == nil || *request.TopP < 0.95 {
+			request.TopP = nil
+		}
+		request.TopK = nil
+		if request.Temperature == nil || *request.Temperature != 1.0 {
+			request.Temperature = common.GetPointer[float64](1.0)
+		}
 	}
 
 	if info.ChannelSetting.SystemPrompt != "" {
@@ -158,6 +173,13 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+		}
+
+		// Re-enforce Claude thinking constraints after param_override, because
+		// an admin-configured override could re-inject an invalid top_p/top_k/temperature.
+		jsonData, err = relaycommon.SanitizeClaudeThinkingParams(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 
 		if common.DebugEnabled {
