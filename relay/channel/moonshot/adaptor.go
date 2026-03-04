@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -79,7 +80,47 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	sanitizeAssistantMessages(request)
 	return request, nil
+}
+
+// sanitizeAssistantMessages aligns tool-call history with Moonshot/Kimi constraints.
+func sanitizeAssistantMessages(request *dto.GeneralOpenAIRequest) {
+	if request == nil || len(request.Messages) == 0 {
+		return
+	}
+
+	thinkingActive := len(request.ReasoningEffort) > 0 ||
+		len(request.Reasoning) > 0 ||
+		len(request.THINKING) > 0 ||
+		len(request.EnableThinking) > 0 ||
+		len(request.Think) > 0
+
+	if !thinkingActive {
+		for _, msg := range request.Messages {
+			if msg.ReasoningContent != nil {
+				thinkingActive = true
+				break
+			}
+		}
+	}
+
+	for i, msg := range request.Messages {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+
+		if msg.Content == nil {
+			request.Messages[i].Content = "..."
+		} else if msg.IsStringContent() && strings.TrimSpace(msg.StringContent()) == "" {
+			request.Messages[i].Content = "..."
+		}
+
+		if thinkingActive && msg.ReasoningContent == nil {
+			empty := ""
+			request.Messages[i].ReasoningContent = &empty
+		}
+	}
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {

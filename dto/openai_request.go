@@ -307,12 +307,11 @@ type Message struct {
 	Content          any             `json:"content"`
 	Name             *string         `json:"name,omitempty"`
 	Prefix           *bool           `json:"prefix,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	Reasoning        string          `json:"reasoning,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	Reasoning        *string         `json:"reasoning,omitempty"`
 	ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
 	ToolCallId       string          `json:"tool_call_id,omitempty"`
 	parsedContent    []MediaContent
-	//parsedStringContent *string
 }
 
 type MediaContent struct {
@@ -473,6 +472,21 @@ func (m *Message) StringContent() string {
 	}
 
 	return ""
+}
+
+func (m *Message) GetReasoningContent() string {
+	var sb strings.Builder
+	if m.ReasoningContent != nil {
+		sb.WriteString(*m.ReasoningContent)
+	}
+	if m.Reasoning != nil {
+		sb.WriteString(*m.Reasoning)
+	}
+	return sb.String()
+}
+
+func (m *Message) SetReasoningContent(s string) {
+	m.ReasoningContent = &s
 }
 
 func (m *Message) SetNullContent() {
