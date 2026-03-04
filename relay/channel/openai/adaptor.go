@@ -362,27 +362,9 @@ func shouldSanitizeAssistantToolCallForModel(model string) bool {
 	return strings.HasPrefix(model, "kimi") || strings.HasPrefix(model, "moonshot")
 }
 
-// sanitizeAssistantMessages fixes assistant+tool_calls history for strict providers:
-// 1) content must be non-empty;
-// 2) when thinking is enabled, reasoning_content must be present.
 func sanitizeAssistantMessages(request *dto.GeneralOpenAIRequest) {
 	if len(request.Messages) == 0 {
 		return
-	}
-
-	thinkingActive := len(request.ReasoningEffort) > 0 ||
-		len(request.Reasoning) > 0 ||
-		len(request.THINKING) > 0 ||
-		len(request.EnableThinking) > 0 ||
-		len(request.Think) > 0
-
-	if !thinkingActive {
-		for _, msg := range request.Messages {
-			if msg.ReasoningContent != nil {
-				thinkingActive = true
-				break
-			}
-		}
 	}
 
 	for i, msg := range request.Messages {
@@ -391,16 +373,13 @@ func sanitizeAssistantMessages(request *dto.GeneralOpenAIRequest) {
 		}
 
 		if len(msg.ToolCalls) > 0 {
-			if msg.Content == nil {
-				request.Messages[i].Content = "..."
-			} else if msg.IsStringContent() && strings.TrimSpace(msg.StringContent()) == "" {
+			if msg.Content == nil || strings.TrimSpace(msg.StringContent()) == "" {
 				request.Messages[i].Content = "..."
 			}
-		}
-
-		if thinkingActive && msg.ReasoningContent == nil && len(msg.ToolCalls) > 0 {
-			empty := ""
-			request.Messages[i].ReasoningContent = &empty
+			if msg.ReasoningContent == nil || strings.TrimSpace(*msg.ReasoningContent) == "" {
+				placeholder := "..."
+				request.Messages[i].ReasoningContent = &placeholder
+			}
 		}
 	}
 }
