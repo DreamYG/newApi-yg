@@ -186,11 +186,19 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		usage.CompletionTokens += toolCount * 7
 	}
 
-	info.ResponseContent = responseTextBuilder.String()
-
-	// 单独提取思考内容，供 Langfuse 结构化上报使用，不影响 token 计数
-	if _, reasoning := ExtractSeparatedContent(streamItems); reasoning != "" {
+	// 分离正式回答与思考内容，供 Langfuse 结构化上报使用。
+	// token 计数已在上方使用 responseTextBuilder（含两者）完成，不受影响。
+	answer, reasoning := ExtractSeparatedContent(streamItems)
+	if reasoning != "" {
 		info.ReasoningContent = reasoning
+		// ResponseContent 只保留正式回答，避免思考内容混入 Langfuse 的 content 字段
+		if answer != "" {
+			info.ResponseContent = answer
+		} else {
+			info.ResponseContent = responseTextBuilder.String()
+		}
+	} else {
+		info.ResponseContent = responseTextBuilder.String()
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))

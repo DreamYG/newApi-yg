@@ -567,11 +567,14 @@ type ClaudeResponseInfo struct {
 	ResponseId   string
 	Created      int64
 	Model        string
+	// ResponseText 同时写入正文与思考内容，用于 token 计数（保持原有行为）
 	ResponseText strings.Builder
 	// ThinkingText 仅收集思考块内容，供 Langfuse 结构化上报使用
 	ThinkingText strings.Builder
-	Usage        *dto.Usage
-	Done         bool
+	// AnswerText 仅收集正式回答内容，供 Langfuse content 字段使用
+	AnswerText strings.Builder
+	Usage      *dto.Usage
+	Done       bool
 }
 
 func buildMessageDeltaPatchUsage(claudeResponse *dto.ClaudeResponse, claudeInfo *ClaudeResponseInfo) *dto.ClaudeUsage {
@@ -672,10 +675,13 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 		if claudeResponse.Delta != nil {
 			if claudeResponse.Delta.Text != nil {
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Text)
+				// AnswerText 只收集正式回答文本，供 Langfuse content 字段使用
+				claudeInfo.AnswerText.WriteString(*claudeResponse.Delta.Text)
 			}
 			if claudeResponse.Delta.Thinking != nil {
-				// ResponseText 保留原有行为（供 token 计数），ThinkingText 单独收集思考内容
+				// ResponseText 保留原有行为（供 token 计数）
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
+				// ThinkingText 单独收集思考内容，供 Langfuse thinking 字段使用
 				claudeInfo.ThinkingText.WriteString(*claudeResponse.Delta.Thinking)
 			}
 		}
@@ -810,10 +816,17 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		return nil, err
 	}
 
-	info.ResponseContent = claudeInfo.ResponseText.String()
-	// 将思考内容单独存入 ReasoningContent，供 Langfuse 结构化上报使用
+	// 有思考内容时：ResponseContent 只保留正式回答，避免混入 Langfuse content 字段
+	// ResponseText（含两者）已在上方用于 token 计数，此处不影响计费逻辑
 	if thinking := claudeInfo.ThinkingText.String(); thinking != "" {
 		info.ReasoningContent = thinking
+		if answer := claudeInfo.AnswerText.String(); answer != "" {
+			info.ResponseContent = answer
+		} else {
+			info.ResponseContent = claudeInfo.ResponseText.String()
+		}
+	} else {
+		info.ResponseContent = claudeInfo.ResponseText.String()
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
