@@ -31,10 +31,7 @@ func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.
 		inputData = info.Request
 	}
 
-	var outputData any
-	if info.ResponseContent != "" {
-		outputData = info.ResponseContent
-	}
+	outputData := buildOutputData(info.ResponseContent, info.ReasoningContent)
 
 	tags := []string{}
 	if tokenName != "" {
@@ -139,6 +136,7 @@ func ReportGenerationAsync(ctx *gin.Context, info *relaycommon.RelayInfo, usage 
 		TokenId:           info.TokenId,
 		UsingGroup:        info.UsingGroup,
 		ResponseContent:   info.ResponseContent,
+		ReasoningContent:  info.ReasoningContent,
 		Username:          username,
 		TokenName:         tokenName,
 	}
@@ -178,9 +176,30 @@ type reportSnapshot struct {
 	ChannelType       int
 	UsingGroup        string
 	ResponseContent   string
+	// ReasoningContent 仅包含模型的思考/推理内容（不含正式回答）
+	ReasoningContent string
 	Username          string
 	TokenName         string
 	RequestJSON       string
+}
+
+// buildOutputData 根据是否存在思考内容，构建 Langfuse generation output 字段。
+// 若存在思考内容，返回符合 Langfuse ChatML schema 的结构化消息，前端可分区展示思考与回答；
+// 否则退回为纯字符串，保持与原有行为兼容。
+func buildOutputData(responseContent, reasoningContent string) any {
+	if responseContent == "" {
+		return nil
+	}
+	if reasoningContent == "" {
+		return responseContent
+	}
+	return ChatMLAssistantMessage{
+		Role:    "assistant",
+		Content: responseContent,
+		Thinking: []ChatMLThinkingPart{
+			{Type: "thinking", Content: reasoningContent},
+		},
+	}
 }
 
 func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
@@ -195,10 +214,7 @@ func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
 		inputData = snap.RequestJSON
 	}
 
-	var outputData any
-	if snap.ResponseContent != "" {
-		outputData = snap.ResponseContent
-	}
+	outputData := buildOutputData(snap.ResponseContent, snap.ReasoningContent)
 
 	tags := []string{}
 	if snap.TokenName != "" {

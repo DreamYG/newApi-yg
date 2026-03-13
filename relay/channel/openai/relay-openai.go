@@ -188,6 +188,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	info.ResponseContent = responseTextBuilder.String()
 
+	// 单独提取思考内容，供 Langfuse 结构化上报使用，不影响 token 计数
+	if _, reasoning := ExtractSeparatedContent(streamItems); reasoning != "" {
+		info.ReasoningContent = reasoning
+	}
+
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))
 
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
@@ -264,6 +269,10 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 
 	if len(simpleResponse.Choices) > 0 {
 		info.ResponseContent = simpleResponse.Choices[0].Message.StringContent()
+		// 提取思考内容，供 Langfuse 结构化上报使用
+		if rc := simpleResponse.Choices[0].Message.GetReasoningContent(); rc != "" {
+			info.ReasoningContent = rc
+		}
 	}
 
 	switch info.RelayFormat {

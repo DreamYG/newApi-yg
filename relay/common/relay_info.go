@@ -154,6 +154,8 @@ type RelayInfo struct {
 
 	Request         dto.Request
 	ResponseContent string
+	// ReasoningContent 仅存储模型的思考/推理内容，不含正式回答，用于 Langfuse 结构化上报
+	ReasoningContent string
 
 	// RequestConversionChain records request format conversions in order, e.g.
 	// ["openai", "openai_responses"] or ["openai", "claude"].

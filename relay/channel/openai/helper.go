@@ -259,3 +259,25 @@ func sendResponsesStreamData(c *gin.Context, streamResponse dto.ResponsesStreamR
 	}
 	helper.ResponseChunkData(c, streamResponse, data)
 }
+
+// ExtractSeparatedContent 对流式 SSE 数据做第二次扫描，将正文内容与思考/推理内容分开返回。
+// answerContent 为正式回答文本，reasoningContent 为思考链文本。
+// 该函数不影响现有的 token 计数流程，仅供 Langfuse 上报使用。
+func ExtractSeparatedContent(streamItems []string) (answerContent, reasoningContent string) {
+	var answerBuilder, reasoningBuilder strings.Builder
+	for _, item := range streamItems {
+		var streamResponse dto.ChatCompletionsStreamResponse
+		if err := json.Unmarshal(common.StringToByteSlice(item), &streamResponse); err != nil {
+			continue
+		}
+		for _, choice := range streamResponse.Choices {
+			if content := choice.Delta.GetContentString(); content != "" {
+				answerBuilder.WriteString(content)
+			}
+			if rc := choice.Delta.GetReasoningContent(); rc != "" {
+				reasoningBuilder.WriteString(rc)
+			}
+		}
+	}
+	return answerBuilder.String(), reasoningBuilder.String()
+}

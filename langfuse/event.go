@@ -61,3 +61,22 @@ type IngestionResult struct {
 	Status  int    `json:"status"`
 	Message string `json:"message,omitempty"`
 }
+
+// --- Langfuse ChatML 结构化消息类型 ---
+
+// ChatMLThinkingPart 对应 Langfuse ThinkingContentPartSchema，用于表示模型的推理/思考片段。
+// 参考：packages/shared/src/utils/IORepresentation/chatML/types.ts
+type ChatMLThinkingPart struct {
+	Type    string `json:"type"`              // 固定值 "thinking"
+	Content string `json:"content"`           // 思考文本
+	Summary string `json:"summary,omitempty"` // 可选摘要（OpenAI Responses API）
+}
+
+// ChatMLAssistantMessage 是发送给 Langfuse generation output 的结构化助手消息。
+// 当模型产生思考内容时，将正式回答放在 Content，思考链放在 Thinking 数组中，
+// Langfuse 前端会将两者分开渲染。
+type ChatMLAssistantMessage struct {
+	Role     string               `json:"role"`               // 固定值 "assistant"
+	Content  string               `json:"content"`            // 正式回答文本
+	Thinking []ChatMLThinkingPart `json:"thinking,omitempty"` // 思考内容，无则省略
+}

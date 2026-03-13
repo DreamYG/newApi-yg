@@ -568,6 +568,8 @@ type ClaudeResponseInfo struct {
 	Created      int64
 	Model        string
 	ResponseText strings.Builder
+	// ThinkingText 仅收集思考块内容，供 Langfuse 结构化上报使用
+	ThinkingText strings.Builder
 	Usage        *dto.Usage
 	Done         bool
 }
@@ -672,7 +674,9 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Text)
 			}
 			if claudeResponse.Delta.Thinking != nil {
+				// ResponseText 保留原有行为（供 token 计数），ThinkingText 单独收集思考内容
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
+				claudeInfo.ThinkingText.WriteString(*claudeResponse.Delta.Thinking)
 			}
 		}
 	} else if claudeResponse.Type == "message_delta" {
@@ -807,6 +811,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	}
 
 	info.ResponseContent = claudeInfo.ResponseText.String()
+	// 将思考内容单独存入 ReasoningContent，供 Langfuse 结构化上报使用
+	if thinking := claudeInfo.ThinkingText.String(); thinking != "" {
+		info.ReasoningContent = thinking
+	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
 	return claudeInfo.Usage, nil
@@ -879,13 +887,25 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 
 	var parsed dto.ClaudeResponse
 	if common.Unmarshal(responseBody, &parsed) == nil {
-		var sb strings.Builder
+		var textBuilder, thinkingBuilder strings.Builder
 		for _, block := range parsed.Content {
-			if block.GetText() != "" {
-				sb.WriteString(block.GetText())
+			switch block.Type {
+			case "thinking":
+				// 提取明文思考内容（加密块跳过）
+				if block.Thinking != nil {
+					thinkingBuilder.WriteString(*block.Thinking)
+				}
+			default:
+				if text := block.GetText(); text != "" {
+					textBuilder.WriteString(text)
+				}
 			}
 		}
-		info.ResponseContent = sb.String()
+		info.ResponseContent = textBuilder.String()
+		// 将思考内容单独存入 ReasoningContent，供 Langfuse 结构化上报使用
+		if thinking := thinkingBuilder.String(); thinking != "" {
+			info.ReasoningContent = thinking
+		}
 	}
 
 	return claudeInfo.Usage, nil
