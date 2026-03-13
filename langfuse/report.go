@@ -1,6 +1,7 @@
 package langfuse
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -10,7 +11,144 @@ import (
 	"github.com/google/uuid"
 )
 
-// ReportGeneration asynchronously sends a trace + generation event pair to Langfuse.
+// requestParams 从 dto.Request 中提取对模型调参和 Agent 评估有用的请求参数。
+type requestParams struct {
+	Temperature     *float64
+	MaxTokens       uint
+	TopP            *float64
+	ReasoningEffort string
+	ResponseFormat  string // "text" | "json_object" | "json_schema" | ""
+	HasTools        bool
+	ToolCount       int
+	HasSystemPrompt bool
+	MessageCount    int
+}
+
+// extractRequestParams 尝试将 dto.Request 转型为 GeneralOpenAIRequest 并提取关键参数。
+// 若转型失败（非 OpenAI 兼容格式），返回空结构体。
+func extractRequestParams(req dto.Request) requestParams {
+	r, ok := req.(*dto.GeneralOpenAIRequest)
+	if !ok || r == nil {
+		return requestParams{}
+	}
+	p := requestParams{
+		Temperature:     r.Temperature,
+		MaxTokens:       r.GetMaxTokens(),
+		TopP:            r.TopP,
+		ReasoningEffort: r.ReasoningEffort,
+		HasTools:        len(r.Tools) > 0,
+		ToolCount:       len(r.Tools),
+		MessageCount:    len(r.Messages),
+	}
+	if r.ResponseFormat != nil {
+		p.ResponseFormat = r.ResponseFormat.Type
+	}
+	for _, msg := range r.Messages {
+		if msg.Role == "system" {
+			p.HasSystemPrompt = true
+			break
+		}
+	}
+	return p
+}
+
+// extractInputMessages 从请求中提取 messages 数组并序列化为 JSON 字节切片。
+// 只取 messages，不包含 model/stream/temperature 等字段，
+// 使 Langfuse 能正确识别 ChatML 格式并按 role 分区渲染。
+// 返回 nil 表示非 OpenAI 兼容请求或 messages 为空。
+func extractInputMessages(req dto.Request) []byte {
+	if req == nil {
+		return nil
+	}
+	r, ok := req.(*dto.GeneralOpenAIRequest)
+	if !ok || r == nil || len(r.Messages) == 0 {
+		return nil
+	}
+	b, err := common.Marshal(r.Messages)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// buildTraceMetadata 构建 Trace 级别的 metadata，聚焦于用户身份与请求上下文。
+func buildTraceMetadata(snap *reportSnapshot) map[string]any {
+	m := map[string]any{
+		// 用户身份（便于用户画像分析）
+		"username":    snap.Username,
+		"user_email":  snap.UserEmail,
+		"user_group":  snap.UserGroup,
+		"token_name":  snap.TokenName,
+		// 请求路由上下文
+		"gateway_group":  snap.UsingGroup,
+		"billing_source": snap.BillingSource,
+		// 请求特征（快速分类用）
+		"is_stream":     snap.IsStream,
+		"has_reasoning": snap.ReasoningContent != "",
+		"retry_count":   snap.RetryIndex,
+	}
+	// 去除空字符串字段，保持 Langfuse UI 整洁
+	for k, v := range m {
+		if s, ok := v.(string); ok && s == "" {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
+// buildGenerationMetadata 构建 Generation 级别的 metadata，聚焦于模型参数、性能指标和响应特征。
+func buildGenerationMetadata(snap *reportSnapshot, endTime time.Time) map[string]any {
+	// 性能指标
+	var ttftMs, totalLatencyMs int64
+	if !snap.FirstResponseTime.IsZero() {
+		ttftMs = snap.FirstResponseTime.Sub(snap.StartTime).Milliseconds()
+	}
+	if !snap.StartTime.IsZero() {
+		totalLatencyMs = endTime.Sub(snap.StartTime).Milliseconds()
+	}
+
+	m := map[string]any{
+		// --- 模型参数（调参核心字段）---
+		"temperature":      snap.Temperature,
+		"max_tokens":       snap.MaxTokens,
+		"top_p":            snap.TopP,
+		"reasoning_effort": snap.ReasoningEffort,
+		"response_format":  snap.ResponseFormat,
+		"has_tools":        snap.HasTools,
+		"tool_count":       snap.ToolCount,
+		"has_system_prompt": snap.HasSystemPrompt,
+		"message_count":    snap.MessageCount,
+		// --- 上游路由信息 ---
+		"upstream_model":  snap.UpstreamModelName,
+		"is_model_mapped": snap.IsModelMapped,
+		"provider_url":    snap.ChannelBaseUrl,
+		// --- 性能指标（Agent 评估关键）---
+		"ttft_ms":          ttftMs,
+		"total_latency_ms": totalLatencyMs,
+		// --- 响应特征（用于质量评估）---
+		"response_length":  len(snap.ResponseContent),
+		"reasoning_length": len(snap.ReasoningContent),
+		"has_reasoning":    snap.ReasoningContent != "",
+		"relay_format":     snap.RelayFormat,
+		// --- 可靠性 ---
+		"retry_count": snap.RetryIndex,
+	}
+	// 去除 nil 及无意义的零值字段
+	if snap.Temperature == nil {
+		delete(m, "temperature")
+	}
+	if snap.TopP == nil {
+		delete(m, "top_p")
+	}
+	for _, k := range []string{"reasoning_effort", "response_format", "upstream_model", "provider_url", "relay_format"} {
+		if s, ok := m[k].(string); ok && s == "" {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
+// ReportGeneration sends a trace + generation event pair to Langfuse synchronously.
 // Safe to call when the client is disabled (no-op).
 func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage) {
 	if globalClient == nil {
@@ -26,9 +164,12 @@ func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.
 	username := ctx.GetString("username")
 	tokenName := ctx.GetString("token_name")
 
+	reqParams := extractRequestParams(info.Request)
+
+	// 只取 messages 数组作为 input，使 Langfuse 能识别 ChatML role 并分区渲染
 	var inputData any
-	if info.Request != nil {
-		inputData = info.Request
+	if r, ok := info.Request.(*dto.GeneralOpenAIRequest); ok && r != nil && len(r.Messages) > 0 {
+		inputData = r.Messages
 	}
 
 	outputData := buildOutputData(info.ResponseContent, info.ReasoningContent)
@@ -41,14 +182,39 @@ func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.
 		tags = append(tags, "group:"+info.UsingGroup)
 	}
 
-	metadata := map[string]any{
-		"token_id":  info.TokenId,
-		"is_stream": info.IsStream,
-		"user_id":   info.UserId,
+	// 为同步路径构建等价的 snapshot 用于 metadata 生成
+	snap := &reportSnapshot{
+		Username:          username,
+		UserEmail:         info.UserEmail,
+		UserGroup:         info.UserGroup,
+		TokenName:         tokenName,
+		UsingGroup:        info.UsingGroup,
+		BillingSource:     info.BillingSource,
+		RetryIndex:        info.RetryIndex,
+		IsStream:          info.IsStream,
+		RelayFormat:       string(info.RelayFormat),
+		RelayMode:         info.RelayMode,
+		StartTime:         info.StartTime,
+		FirstResponseTime: info.FirstResponseTime,
+		EndTime:           now,
+		ResponseContent:   info.ResponseContent,
+		ReasoningContent:  info.ReasoningContent,
+		Temperature:       reqParams.Temperature,
+		MaxTokens:         reqParams.MaxTokens,
+		TopP:              reqParams.TopP,
+		ReasoningEffort:   reqParams.ReasoningEffort,
+		ResponseFormat:    reqParams.ResponseFormat,
+		HasTools:          reqParams.HasTools,
+		ToolCount:         reqParams.ToolCount,
+		HasSystemPrompt:   reqParams.HasSystemPrompt,
+		MessageCount:      reqParams.MessageCount,
 	}
 	if info.ChannelMeta != nil {
-		metadata["channel_id"] = info.ChannelId
-		metadata["channel_type"] = info.ChannelType
+		snap.ChannelId = info.ChannelId
+		snap.ChannelType = info.ChannelType
+		snap.ChannelBaseUrl = info.ChannelBaseUrl
+		snap.UpstreamModelName = info.UpstreamModelName
+		snap.IsModelMapped = info.IsModelMapped
 	}
 
 	var usageData *UsageData
@@ -79,17 +245,8 @@ func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.
 			Input:    inputData,
 			Output:   outputData,
 			Tags:     tags,
-			Metadata: metadata,
+			Metadata: buildTraceMetadata(snap),
 		},
-	}
-
-	genMetadata := map[string]any{
-		"is_stream":    info.IsStream,
-		"relay_mode":   info.RelayMode,
-		"relay_format": info.RelayFormat,
-	}
-	if info.ChannelMeta != nil {
-		genMetadata["channel_id"] = info.ChannelId
 	}
 
 	generationEvent := IngestionEvent{
@@ -107,7 +264,7 @@ func ReportGeneration(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.
 			StartTime:           &startTime,
 			EndTime:             &now,
 			CompletionStartTime: completionStartTime,
-			Metadata:            genMetadata,
+			Metadata:            buildGenerationMetadata(snap, now),
 		},
 	}
 
@@ -124,33 +281,55 @@ func ReportGenerationAsync(ctx *gin.Context, info *relaycommon.RelayInfo, usage 
 	username := ctx.GetString("username")
 	tokenName := ctx.GetString("token_name")
 
-	infoCopy := &reportSnapshot{
+	// 提取请求参数（在进入 goroutine 前完成，避免并发读写 info.Request）
+	reqParams := extractRequestParams(info.Request)
+
+	snap := &reportSnapshot{
+		// 请求基础信息
 		RequestId:         info.RequestId,
 		OriginModelName:   info.OriginModelName,
 		RequestURLPath:    info.RequestURLPath,
-		IsStream:          info.IsStream,
+		RelayFormat:       string(info.RelayFormat),
 		RelayMode:         info.RelayMode,
 		StartTime:         info.StartTime,
 		FirstResponseTime: info.FirstResponseTime,
-		UserId:            info.UserId,
-		TokenId:           info.TokenId,
-		UsingGroup:        info.UsingGroup,
-		ResponseContent:   info.ResponseContent,
-		ReasoningContent:  info.ReasoningContent,
-		Username:          username,
-		TokenName:         tokenName,
+		EndTime:           time.Now(), // 响应已完成，记录此刻作为结束时间
+		IsStream:          info.IsStream,
+		// 用户与认证信息
+		Username:      username,
+		UserEmail:     info.UserEmail,
+		UserGroup:     info.UserGroup,
+		UserId:        info.UserId,
+		TokenId:       info.TokenId,
+		TokenName:     tokenName,
+		UsingGroup:    info.UsingGroup,
+		BillingSource: info.BillingSource,
+		RetryIndex:    info.RetryIndex,
+		// 响应内容
+		ResponseContent:  info.ResponseContent,
+		ReasoningContent: info.ReasoningContent,
+		// 请求参数
+		Temperature:     reqParams.Temperature,
+		MaxTokens:       reqParams.MaxTokens,
+		TopP:            reqParams.TopP,
+		ReasoningEffort: reqParams.ReasoningEffort,
+		ResponseFormat:  reqParams.ResponseFormat,
+		HasTools:        reqParams.HasTools,
+		ToolCount:       reqParams.ToolCount,
+		HasSystemPrompt: reqParams.HasSystemPrompt,
+		MessageCount:    reqParams.MessageCount,
 	}
+
 	if info.ChannelMeta != nil {
-		infoCopy.ChannelId = info.ChannelId
-		infoCopy.ChannelType = info.ChannelType
+		snap.ChannelId = info.ChannelId
+		snap.ChannelType = info.ChannelType
+		snap.ChannelBaseUrl = info.ChannelBaseUrl
+		snap.UpstreamModelName = info.UpstreamModelName
+		snap.IsModelMapped = info.IsModelMapped
 	}
-	infoCopy.RelayFormat = string(info.RelayFormat)
-	if info.Request != nil {
-		reqBytes, err := common.Marshal(info.Request)
-		if err == nil {
-			infoCopy.RequestJSON = string(reqBytes)
-		}
-	}
+
+	// 在进入 goroutine 前提取 messages（[]byte 可安全跨 goroutine 传递）
+	snap.InputMessages = extractInputMessages(info.Request)
 
 	var usageCopy *dto.Usage
 	if usage != nil {
@@ -158,29 +337,57 @@ func ReportGenerationAsync(ctx *gin.Context, info *relaycommon.RelayInfo, usage 
 		usageCopy = &u
 	}
 
-	go reportFromSnapshot(infoCopy, usageCopy)
+	go reportFromSnapshot(snap, usageCopy)
 }
 
 type reportSnapshot struct {
-	RequestId         string
-	OriginModelName   string
-	RequestURLPath    string
-	IsStream          bool
-	RelayMode         int
-	RelayFormat       string
-	StartTime         time.Time
+	// 请求基础信息
+	RequestId       string
+	OriginModelName string
+	RequestURLPath  string
+	RelayFormat     string
+	RelayMode       int
+	StartTime       time.Time
 	FirstResponseTime time.Time
-	UserId            int
-	TokenId           int
+	EndTime         time.Time // 响应完成时刻，用于计算总延迟
+	IsStream        bool
+
+	// 用户与认证信息
+	Username      string
+	UserEmail     string
+	UserGroup     string
+	UserId        int
+	TokenId       int
+	TokenName     string
+	UsingGroup    string
+	BillingSource string
+	RetryIndex    int
+
+	// 渠道路由信息
 	ChannelId         int
 	ChannelType       int
-	UsingGroup        string
-	ResponseContent   string
-	// ReasoningContent 仅包含模型的思考/推理内容（不含正式回答）
-	ReasoningContent string
-	Username          string
-	TokenName         string
-	RequestJSON       string
+	ChannelBaseUrl    string
+	UpstreamModelName string
+	IsModelMapped     bool
+
+	// 请求参数（模型调参关键字段）
+	Temperature     *float64
+	MaxTokens       uint
+	TopP            *float64
+	ReasoningEffort string
+	ResponseFormat  string
+	HasTools        bool
+	ToolCount       int
+	HasSystemPrompt bool
+	MessageCount    int
+
+	// 响应内容
+	ResponseContent  string
+	ReasoningContent string // 仅包含模型的思考/推理内容（不含正式回答）
+
+	// 预序列化的 messages 数组（仅含消息列表，不含模型参数）
+	// 使用 []byte 在 goroutine 间传递，避免并发读取 dto.Request
+	InputMessages []byte
 }
 
 // buildOutputData 根据是否存在思考内容，构建 Langfuse generation output 字段。
@@ -209,9 +416,19 @@ func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
 		requestId = uuid.New().String()
 	}
 
+	// 将预序列化的 messages 反序列化为原生 JSON 类型（[]interface{}），
+	// 这样上报给 Langfuse 时才是真正的 JSON 数组，而非 Go string。
+	// Langfuse ChatML 适配器会识别 role 字段并分区渲染：
+	//   system → 系统提示词（IDE rules / project context）
+	//   user   → 用户消息
+	//   assistant → 历史回答（可含 tool_calls）
+	//   tool   → 工具调用结果（含 tool_call_id）
 	var inputData any
-	if snap.RequestJSON != "" {
-		inputData = snap.RequestJSON
+	if len(snap.InputMessages) > 0 {
+		var msgs any
+		if err := json.Unmarshal(snap.InputMessages, &msgs); err == nil {
+			inputData = msgs
+		}
 	}
 
 	outputData := buildOutputData(snap.ResponseContent, snap.ReasoningContent)
@@ -224,12 +441,9 @@ func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
 		tags = append(tags, "group:"+snap.UsingGroup)
 	}
 
-	metadata := map[string]any{
-		"channel_id":   snap.ChannelId,
-		"channel_type": snap.ChannelType,
-		"token_id":     snap.TokenId,
-		"is_stream":    snap.IsStream,
-		"user_id":      snap.UserId,
+	endTime := snap.EndTime
+	if endTime.IsZero() {
+		endTime = now
 	}
 
 	var usageData *UsageData
@@ -260,15 +474,8 @@ func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
 			Input:    inputData,
 			Output:   outputData,
 			Tags:     tags,
-			Metadata: metadata,
+			Metadata: buildTraceMetadata(snap),
 		},
-	}
-
-	genMetadata := map[string]any{
-		"channel_id":   snap.ChannelId,
-		"is_stream":    snap.IsStream,
-		"relay_mode":   snap.RelayMode,
-		"relay_format": snap.RelayFormat,
 	}
 
 	generationEvent := IngestionEvent{
@@ -284,9 +491,9 @@ func reportFromSnapshot(snap *reportSnapshot, usage *dto.Usage) {
 			Output:              outputData,
 			Usage:               usageData,
 			StartTime:           &startTime,
-			EndTime:             &now,
+			EndTime:             &endTime,
 			CompletionStartTime: completionStartTime,
-			Metadata:            genMetadata,
+			Metadata:            buildGenerationMetadata(snap, endTime),
 		},
 	}
 
