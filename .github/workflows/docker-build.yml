@@ -4,7 +4,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - main  # 如果你的默认分支叫 master，请把这里改成 master
+      - Branch_feature/security_filter  # 如果你的默认分支叫 master，请把这里改成 master
 
 jobs:
   build:
@@ -33,7 +33,7 @@ jobs:
           context: .
           push: true
           # 修改为你自己的镜像名称，例如：你的用户名/new-api-custom:latest
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/new-api-custom:260304
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/new-api-custom:security_filter
           # 开启构建缓存，下一次打包会快很多
           cache-from: type=gha
           cache-to: type=gha,mode=max

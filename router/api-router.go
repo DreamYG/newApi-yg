@@ -364,5 +364,23 @@ func SetApiRouter(router *gin.Engine) {
 			deploymentsRoute.POST("/:id/extend", controller.ExtendDeployment)
 			deploymentsRoute.DELETE("/:id", controller.DeleteDeployment)
 		}
+
+		// Security (信息安全模块)
+		securityRoute := apiRouter.Group("/security")
+		securityRoute.Use(middleware.AdminAuth())
+		{
+			securityRoute.GET("/keywords", controller.GetSecurityKeywords)
+			securityRoute.POST("/keywords", controller.CreateSecurityKeyword)
+			securityRoute.PUT("/keywords/:id", controller.UpdateSecurityKeyword)
+			securityRoute.DELETE("/keywords/:id", controller.DeleteSecurityKeyword)
+			securityRoute.POST("/keywords/:id/toggle", controller.ToggleSecurityKeyword)
+
+			securityRoute.GET("/audit-logs", controller.GetSecurityAuditLogs)
+			securityRoute.DELETE("/audit-logs", controller.ClearSecurityAuditLogs)
+
+			securityRoute.GET("/config", controller.GetSecurityConfig)
+			securityRoute.PUT("/config", controller.UpdateSecurityConfig)
+			securityRoute.POST("/config/test-notify", controller.TestSecurityNotify)
+		}
 	}
 }
