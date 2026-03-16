@@ -138,7 +138,44 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		contains, words := service.CheckSensitiveText(meta.CombineText)
 		if contains {
 			logger.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
+			go service.HandleSensitiveWordHit(
+				c.GetInt("id"), c.GetString("username"), words,
+				relayInfo.OriginModelName, c.ClientIP(),
+			)
 			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected)
+			return
+		}
+	}
+
+	// 危险关键词检测（独立于敏感词，支持禁用用户）
+	if r, ok := request.(*dto.GeneralOpenAIRequest); ok && len(r.Messages) > 0 {
+		combineText := ""
+		if meta != nil {
+			combineText = meta.CombineText
+		}
+		if result := service.CheckSecurityText(combineText, r.Messages); result != nil {
+			userId := c.GetInt("id")
+			username := c.GetString("username")
+			logger.LogWarn(c, fmt.Sprintf("security keyword hit: user=%s, keyword=%s, matched=%s, action=%s",
+				username, result.Keyword.Keyword, result.Matched, result.Keyword.Action))
+
+			// 异步写审计日志 + 更新触发计数
+			go service.HandleSecurityHit(userId, username, result, relayInfo.OriginModelName, c.ClientIP())
+
+			if result.Keyword.Action == "ban_user" {
+				go service.BanUserForSecurity(userId, username)
+				newAPIError = types.NewErrorWithStatusCode(
+					fmt.Errorf("dangerous content detected, user has been disabled"),
+					types.ErrorCodeSensitiveWordsDetected,
+					http.StatusForbidden,
+				)
+			} else {
+				newAPIError = types.NewErrorWithStatusCode(
+					fmt.Errorf("request blocked: dangerous keyword detected"),
+					types.ErrorCodeSensitiveWordsDetected,
+					http.StatusBadRequest,
+				)
+			}
 			return
 		}
 	}

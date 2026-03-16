@@ -2,10 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Layout, TabPane, Tabs } from '@douyinfe/semi-ui';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ShieldAlert, Filter, Bell, FileText } from 'lucide-react';
+import { ShieldAlert, Bell, FileText } from 'lucide-react';
 
 import DangerousKeywords from './components/DangerousKeywords';
-import SecurityContentFilter from './components/SecurityContentFilter';
 import SecurityNotification from './components/SecurityNotification';
 import SecurityAuditLog from './components/SecurityAuditLog';
 
@@ -25,16 +24,6 @@ const Security = () => {
       ),
       content: <DangerousKeywords />,
       itemKey: 'keywords',
-    },
-    {
-      tab: (
-        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-          <Filter size={18} />
-          {t('内容过滤')}
-        </span>
-      ),
-      content: <SecurityContentFilter />,
-      itemKey: 'filter',
     },
     {
       tab: (

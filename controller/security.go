@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -70,6 +71,7 @@ func CreateSecurityKeyword(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	service.InvalidateSecurityKeywordsCache()
 	if common.DebugEnabled {
 		common.SysLog(fmt.Sprintf("Security: created keyword id=%d, keyword=%s, action=%s, severity=%s, matchType=%s, checkScope=%s",
 			kw.Id, kw.Keyword, kw.Action, kw.Severity, kw.MatchType, kw.CheckScope))
@@ -121,6 +123,7 @@ func UpdateSecurityKeyword(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	service.InvalidateSecurityKeywordsCache()
 	if common.DebugEnabled {
 		common.SysLog(fmt.Sprintf("Security: updated keyword id=%d, keyword=%s, action=%s, severity=%s",
 			existing.Id, existing.Keyword, existing.Action, existing.Severity))
@@ -139,6 +142,7 @@ func DeleteSecurityKeyword(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	service.InvalidateSecurityKeywordsCache()
 	if common.DebugEnabled {
 		common.SysLog(fmt.Sprintf("Security: deleted keyword id=%d", id))
 	}
@@ -156,6 +160,7 @@ func ToggleSecurityKeyword(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	service.InvalidateSecurityKeywordsCache()
 	if common.DebugEnabled {
 		common.SysLog(fmt.Sprintf("Security: toggled keyword id=%d", id))
 	}
