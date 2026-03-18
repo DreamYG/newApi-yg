@@ -82,20 +82,56 @@ func getOrCompileRegexp(pattern string) *regexp.Regexp {
 
 // SecurityCheckResult 安全检测结果。
 type SecurityCheckResult struct {
-	Hit         bool
-	Keyword     model.SecurityKeyword
-	Matched     string // 实际匹配到的文本片段
-	UserMessage string // 触发时的完整用户消息，用于审计日志摘要
+	Hit          bool
+	Keyword      model.SecurityKeyword
+	Matched      string // 实际匹配到的关键词/正则片段
+	MatchContext string // 匹配位置的上下文（关键词前后各 100 字），用于审计日志摘要
 }
 
-// ExtractTextByScope 根据 checkScope 从 messages 中提取待检测文本，
-// 同时返回最后一条 user 消息（用于审计日志摘要，不受 scope 影响）。
+// extractMatchContext 从原始文本中定位 matched 的位置，提取前后 halfLen 个 Unicode 字符作为上下文。
+// 使用 rune 切片处理多字节字符（中文等），避免字节截断导致乱码。
+// 若定位失败则降级返回 matched 本身。
+func extractMatchContext(rawText, matched string, halfLen int) string {
+	if rawText == "" || matched == "" {
+		return matched
+	}
+	// 用字节级 strings.Index 快速定位（O(n) 无需额外分配）
+	byteIdx := strings.Index(strings.ToLower(rawText), strings.ToLower(matched))
+	if byteIdx < 0 {
+		return matched
+	}
+	// 转为 rune 切片，确保 Unicode 字符边界正确
+	runes := []rune(rawText)
+	// 将字节偏移转换为 rune 偏移
+	runeIdx := len([]rune(rawText[:byteIdx]))
+	matchedRuneLen := len([]rune(matched))
+	totalRunes := len(runes)
+
+	start := runeIdx - halfLen
+	if start < 0 {
+		start = 0
+	}
+	end := runeIdx + matchedRuneLen + halfLen
+	if end > totalRunes {
+		end = totalRunes
+	}
+	ctx := string(runes[start:end])
+	if start > 0 {
+		ctx = "…" + ctx
+	}
+	if end < totalRunes {
+		ctx = ctx + "…"
+	}
+	return ctx
+}
+
+// ExtractTextByScope 根据 checkScope 从 messages 中提取待检测文本并拼接返回。
 //
 // check_scope 三档含义：
 //   - "user_only"     : 所有 role=user 消息（含历史轮次），防止用户手动粘贴敏感内容
 //   - "user_and_tool" : role=user + role=tool，防止工具读取的外部文档中含敏感信息
 //   - "all"           : 全部消息（含 system、assistant），最严格，性能开销最大
-func ExtractTextByScope(messages []dto.Message, checkScope string) (checkText, lastUserText string) {
+func ExtractTextByScope(messages []dto.Message, checkScope string) string {
 	var sb strings.Builder
 	for _, msg := range messages {
 		var shouldCheck bool
@@ -115,21 +151,8 @@ func ExtractTextByScope(messages []dto.Message, checkScope string) (checkText, l
 				sb.WriteString(text)
 			}
 		}
-		// 始终跟踪最后一条 user 消息，用于审计日志摘要
-		if msg.Role == "user" {
-			if text := msg.StringContent(); text != "" {
-				lastUserText = text
-			}
-		}
 	}
-	return sb.String(), lastUserText
-}
-
-// ExtractLastUserText 从 messages 中提取最后一条 role=user 的消息文本内容。
-// 保留此函数以兼容其他可能的调用方。
-func ExtractLastUserText(messages []dto.Message) string {
-	_, last := ExtractTextByScope(messages, "user_only")
-	return last
+	return sb.String()
 }
 
 // HandleSecurityHit 在检测命中后异步写入审计日志并更新触发计数。
@@ -139,13 +162,15 @@ func HandleSecurityHit(userId int, username string, result *SecurityCheckResult,
 		actionStr = "user_banned"
 	}
 
-	// 优先使用完整用户消息作为摘要，其次降级为匹配片段
-	summary := result.UserMessage
+	// 使用匹配位置的上下文作为摘要（关键词前后各 150 个 Unicode 字符）
+	// 比"最后一条 user 消息"更精准：触发词所在的原始文本位置，无论在哪条历史消息中
+	summary := result.MatchContext
 	if summary == "" {
 		summary = result.Matched
 	}
-	if len(summary) > 200 {
-		summary = summary[:200]
+	// 使用 rune 截断而非字节截断，避免中文等多字节字符在边界处被截断乱码
+	if runes := []rune(summary); len(runes) > 500 {
+		summary = string(runes[:500])
 	}
 	log := &model.SecurityAuditLog{
 		UserId:         userId,
@@ -229,28 +254,26 @@ func CheckSecurityText(fullText string, messages []dto.Message) *SecurityCheckRe
 	}
 
 	// 预计算各 scope 对应的文本，避免对每条关键词重复提取
-	// scopeTextCache: checkScope → (lowerText, lastUserText)
 	type scopeText struct {
-		text     string // 小写，用于 AC 匹配
-		raw      string // 原始大小写，用于正则匹配
-		lastUser string // 最后一条 user 消息，用于审计日志摘要
+		text string // 小写，用于 AC 匹配
+		raw  string // 原始大小写，用于正则匹配和上下文提取
 	}
 	scopeCache := make(map[string]*scopeText, 3)
 	getScope := func(scope string) *scopeText {
 		if v, ok := scopeCache[scope]; ok {
 			return v
 		}
-		raw, last := ExtractTextByScope(messages, scope)
-		v := &scopeText{text: strings.ToLower(raw), raw: raw, lastUser: last}
+		raw := ExtractTextByScope(messages, scope)
+		v := &scopeText{text: strings.ToLower(raw), raw: raw}
 		scopeCache[scope] = v
 		return v
 	}
 
 	// 收集 exact 关键词，按 scope 分组，每组用 Aho-Corasick 批量匹配
 	type exactGroup struct {
-		words    []string
-		kwMap    map[string]*model.SecurityKeyword
-		scope    string
+		words []string
+		kwMap map[string]*model.SecurityKeyword
+		scope string
 	}
 	groupMap := make(map[string]*exactGroup)
 	for i := range keywords {
@@ -280,7 +303,8 @@ func CheckSecurityText(fullText string, messages []dto.Message) *SecurityCheckRe
 		}
 		if hit, matched := AcSearch(st.text, g.words, true); hit && len(matched) > 0 {
 			if kw, ok := g.kwMap[strings.ToLower(matched[0])]; ok {
-				return &SecurityCheckResult{Hit: true, Keyword: *kw, Matched: matched[0], UserMessage: st.lastUser}
+				ctx := extractMatchContext(st.raw, matched[0], 150)
+				return &SecurityCheckResult{Hit: true, Keyword: *kw, Matched: matched[0], MatchContext: ctx}
 			}
 		}
 	}
@@ -304,7 +328,8 @@ func CheckSecurityText(fullText string, messages []dto.Message) *SecurityCheckRe
 			continue
 		}
 		if loc := re.FindString(st.raw); loc != "" {
-			return &SecurityCheckResult{Hit: true, Keyword: *kw, Matched: loc, UserMessage: st.lastUser}
+			ctx := extractMatchContext(st.raw, loc, 150)
+			return &SecurityCheckResult{Hit: true, Keyword: *kw, Matched: loc, MatchContext: ctx}
 		}
 	}
 
