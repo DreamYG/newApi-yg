@@ -316,6 +316,7 @@ const renderOperations = (
   manageToken,
   refresh,
   t,
+  userDisabled,
 ) => {
   let chatsArray = [];
   try {
@@ -380,15 +381,30 @@ const renderOperations = (
           {t('禁用')}
         </Button>
       ) : (
-        <Button
-          size='small'
-          onClick={async () => {
-            await manageToken(record.id, 'enable', record);
-            await refresh();
-          }}
+        <Tooltip
+          content={userDisabled ? t('账号已被停用，无法启用令牌') : undefined}
         >
-          {t('启用')}
-        </Button>
+          {/* span wrapper 必须存在：disabled Button 有 pointer-events:none，Tooltip hover 不触发 */}
+          <span
+            style={
+              userDisabled
+                ? { cursor: 'not-allowed', display: 'inline-block' }
+                : undefined
+            }
+          >
+            <Button
+              size='small'
+              disabled={userDisabled}
+              style={userDisabled ? { pointerEvents: 'none' } : undefined}
+              onClick={async () => {
+                await manageToken(record.id, 'enable', record);
+                await refresh();
+              }}
+            >
+              {t('启用')}
+            </Button>
+          </span>
+        </Tooltip>
       )}
 
       <Button
@@ -434,6 +450,7 @@ export const getTokensColumns = ({
   setEditingToken,
   setShowEdit,
   refresh,
+  userDisabled,
 }) => {
   return [
     {
@@ -505,6 +522,7 @@ export const getTokensColumns = ({
           manageToken,
           refresh,
           t,
+          userDisabled,
         ),
     },
   ];

@@ -20,6 +20,7 @@ For commercial licensing, please contact support@quantumnous.com
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Notification,
+  Banner,
   Button,
   Space,
   Toast,
@@ -52,6 +53,18 @@ function TokensPage() {
     (key) => openCCSwitchModalRef.current?.(key),
   );
   const isMobile = useIsMobile();
+
+  // 从 DB 实时获取用户状态，防止 session 缓存旧值导致被封禁用户仍能操作令牌
+  const [userDisabled, setUserDisabled] = useState(false);
+  useEffect(() => {
+    API.get('/api/user/self')
+      .then((res) => {
+        if (res.data?.success && res.data?.data?.status === 2) {
+          setUserDisabled(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
   const latestRef = useRef({
     tokens: [],
     selectedKeys: [],
@@ -384,6 +397,16 @@ function TokensPage() {
         modelOptions={modelOptions}
       />
 
+      {userDisabled && (
+        <Banner
+          type='danger'
+          description={tokensData.t(
+            '您的账号已被系统停用，无法添加或启用令牌。请联系管理员申请解封。',
+          )}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       <CardPro
         type='type1'
         descriptionArea={
@@ -402,6 +425,7 @@ function TokensPage() {
               batchCopyTokens={batchCopyTokens}
               batchDeleteTokens={batchDeleteTokens}
               copyText={copyText}
+              userDisabled={userDisabled}
               t={t}
             />
 
@@ -428,7 +452,7 @@ function TokensPage() {
         })}
         t={tokensData.t}
       >
-        <TokensTable {...tokensData} />
+        <TokensTable {...tokensData} userDisabled={userDisabled} />
       </CardPro>
     </>
   );
