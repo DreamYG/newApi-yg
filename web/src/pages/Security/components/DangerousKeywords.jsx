@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Button,
   Modal,
@@ -68,8 +68,8 @@ const DangerousKeywords = () => {
   const [editingItem, setEditingItem] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [importVisible, setImportVisible] = useState(false);
-  const [importText, setImportText] = useState('');
   const [importSubmitting, setImportSubmitting] = useState(false);
+  const importFormRef = useRef(null);
 
   const fetchKeywords = useCallback(async () => {
     setLoading(true);
@@ -104,6 +104,13 @@ const DangerousKeywords = () => {
 
   const handleOpenImport = () => {
     setImportVisible(true);
+    // 每次打开时重置表单内容
+    setTimeout(() => importFormRef.current?.reset(), 0);
+  };
+
+  const handleCloseImport = () => {
+    setImportVisible(false);
+    importFormRef.current?.reset();
   };
 
   const handleEdit = (record) => {
@@ -172,14 +179,14 @@ const DangerousKeywords = () => {
   };
 
   /**
-   * handleImportKeywords 支持两种 JSON 格式：
+   * handleImportSubmit 支持两种 JSON 格式：
    * 1. 直接数组: [{...}, {...}]
    * 2. 包装对象: { "items": [{...}, {...}] }
    */
-  const handleImportKeywords = async () => {
+  const handleImportSubmit = async (values) => {
     let parsed;
     try {
-      parsed = JSON.parse(importText);
+      parsed = JSON.parse(values.json_content);
     } catch (e) {
       Toast.error(t('JSON 解析失败：') + e.message);
       return;
@@ -189,6 +196,7 @@ const DangerousKeywords = () => {
       const res = await API.post('/api/security/keywords/import', parsed);
       if (!res.data?.success) {
         Toast.error(res.data?.message || t('导入失败'));
+        setImportSubmitting(false);
         return;
       }
       const payload = res.data.data || {};
@@ -198,31 +206,20 @@ const DangerousKeywords = () => {
       const errors = payload.errors || [];
 
       if (failed > 0 && created + updated === 0) {
-        Toast.error(
-          errors[0] || t('导入失败，请检查 JSON 内容和字段合法性'),
-        );
+        Toast.error(errors[0] || t('导入失败，请检查 JSON 内容和字段合法性'));
+        setImportSubmitting(false);
         return;
       }
 
       if (failed > 0) {
         Toast.warning(
-          t('导入完成：新增 {{created}} 条，更新 {{updated}} 条，失败 {{failed}} 条', {
-            created,
-            updated,
-            failed,
-          }),
+          `导入完成：新增 ${created} 条，更新 ${updated} 条，失败 ${failed} 条`,
         );
       } else {
-        Toast.success(
-          t('导入成功：新增 {{created}} 条，更新 {{updated}} 条', {
-            created,
-            updated,
-          }),
-        );
+        Toast.success(`导入成功：新增 ${created} 条，更新 ${updated} 条`);
       }
 
-      setImportVisible(false);
-      setImportText('');
+      handleCloseImport();
       if (page !== 1) {
         setPage(1);
       } else {
@@ -539,35 +536,41 @@ const DangerousKeywords = () => {
       <Modal
         title={t('批量导入关键词')}
         visible={importVisible}
-        onCancel={() => setImportVisible(false)}
+        onCancel={handleCloseImport}
         footer={null}
-        width={680}
+        width={520}
       >
-        <div style={{ marginBottom: 12, color: 'var(--semi-color-text-2)' }}>
-          {t('支持直接粘贴 JSON 数组，或使用 { items: [...] } 包装对象。导入按 keyword 做 upsert：存在则更新，不存在则创建。')}
-        </div>
-        <Input.TextArea
-          value={importText}
-          onChange={setImportText}
-          autosize={{ minRows: 16, maxRows: 24 }}
-          style={{ fontFamily: 'JetBrains Mono, Consolas' }}
-          placeholder={`[\n  {\n    "keyword": "保密协议",\n    "match_type": "exact",\n    "check_scope": "user_and_tool",\n    "action": "ban_user",\n    "severity": "high",\n    "notify_admin": true,\n    "enabled": true,\n    "description": "示例规则"\n  }\n]`}
-        />
-        <div style={{ textAlign: 'right', marginTop: 16 }}>
-          <Space>
-            <Button onClick={() => setImportVisible(false)}>
-              {t('取消')}
-            </Button>
-            <Button
-              theme='solid'
-              type='primary'
-              loading={importSubmitting}
-              onClick={handleImportKeywords}
-            >
-              {t('开始导入')}
-            </Button>
-          </Space>
-        </div>
+        <Form
+          onSubmit={handleImportSubmit}
+          getFormApi={(api) => (importFormRef.current = api)}
+          labelPosition='left'
+          labelWidth={100}
+        >
+          <Form.TextArea
+            field='json_content'
+            label={t('JSON 内容')}
+            placeholder={`[\n  {\n    "keyword": "保密协议",\n    "match_type": "exact",\n    "check_scope": "user_and_tool",\n    "action": "ban_user",\n    "severity": "high",\n    "notify_admin": true,\n    "enabled": true,\n    "description": "示例规则"\n  }\n]`}
+            extraText={t('支持 JSON 数组 [...] 或包装对象 {"items":[...]}，按 keyword 做 upsert：已存在则更新，不存在则创建')}
+            rules={[{ required: true, message: t('JSON 内容不能为空') }]}
+            autosize={{ minRows: 14, maxRows: 22 }}
+            style={{ fontFamily: 'JetBrains Mono, Consolas, monospace' }}
+          />
+          <div style={{ textAlign: 'right', marginTop: 16 }}>
+            <Space>
+              <Button onClick={handleCloseImport}>
+                {t('取消')}
+              </Button>
+              <Button
+                theme='solid'
+                type='primary'
+                htmlType='submit'
+                loading={importSubmitting}
+              >
+                {t('开始导入')}
+              </Button>
+            </Space>
+          </div>
+        </Form>
       </Modal>
     </div>
   );
